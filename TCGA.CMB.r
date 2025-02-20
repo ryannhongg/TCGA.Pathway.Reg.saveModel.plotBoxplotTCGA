@@ -1,3 +1,5 @@
+#!/usr/bin/env Rscript
+# library(glmnet)
 library(stringr)
 library(ggpubr)
 library(rstatix)
@@ -10,42 +12,37 @@ library(tidyr)
 library(dplyr)
 library(openxlsx)
 
-# Clear previous variables
 rm(list = ls())
 
 ###############################################################################################################
-# Define Random Forest Cross Validation Function
+# define RF CV function
 ###############################################################################################################
-randomForest_CrossVal <- function(data, formula, fold=5) {
+randomForest_CrossVal <- function(data, formula, fold=5){
+  # config the experiments
   num_sample = dim(data)[1]
-  foldsize = floor(num_sample / fold)
-  expidx = matrix(fold, nrow=num_sample, ncol=1)
-  tmp = rep(1:fold, length.out = num_sample)
-  expidx[c(1:length(tmp))] = tmp
+  foldsize = floor(num_sample/fold)
+  expidx = matrix(fold, nrow=num_sample,ncol=1)
+  tmp = rep(c(1:fold),foldsize)
+  expidx[c(1:length(tmp))]=tmp
+  # expidx = permute(expidx) # may want to permute the idx
   expidx = as.data.frame(expidx)
-  colnames(expidx) = c('foldID')
-  
+  colnames(expidx)=c('foldID')
   results_holdout = c()
-  for (fid in c(1:fold)) {
-    data_train = data[expidx$foldID != fid, ]
-    data_test = data[expidx$foldID == fid, ]
-    
+  for(fid in c(1:fold)){
+    data_train = data[expidx$foldID!=fid,]
+    data_test = data[expidx$foldID==fid,]
     rf <- randomForest(formula, data=data_train, proximity=FALSE)
-    saveRDS(rf, file=paste(result_root_sub, '/', 'rfmodel-fold', fid, '.rds', sep=''))
-    
+    saveRDS(rf,file=paste(result_root_sub,'/','rfmodel-fold',fid,'.rds',sep = ''))
     print(rf)
-    data_test$lbl_rf_prediction = predict(rf, data_test)
-    results_holdout = rbind(results_holdout, data_test)
-    
+    data_test$lbl_rf_prediction <- predict(rf, data_test)
+    results_holdout = rbind(results_holdout,data_test)
     importance_scores = importance(rf)
-    feature_importance = data.frame(Feature=rownames(importance_scores), Importance=importance_scores[, 1])
-    
+    feature_importance = data.frame(Feature=rownames(importance_scores), Importance = importance_scores[,1])
     importance_plot = ggplot(feature_importance, aes(x = reorder(Feature, Importance), y = Importance)) +
       geom_bar(stat = "identity") +
       theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
       labs(x = "Features", y = "Importance", title = "Feature Importance in Random Forest Model")
-    
-    pdf(paste(result_root_sub, '/', 'importance-fold', fid, '.pdf', sep=''), width=45, height=10)
+    pdf(paste(result_root_sub,'/','importance-fold',fid,'.pdf',sep = ''), width=45, height=10)
     print(importance_plot)
     dev.off()
   }
@@ -53,69 +50,75 @@ randomForest_CrossVal <- function(data, formula, fold=5) {
 }
 
 ###############################################################################################################
-# Load Data
+# load data
 ###############################################################################################################
 result_root = './Results'
 dir.create(result_root)
-versioned_dir = paste(result_root, '/TCGA_KIRC_CMB_Analysis', sep='')  # New folder for this analysis
-dir.create(versioned_dir, showWarnings = FALSE)
+cmb_data = read.xlsx('./Data/TCGA.Prostate.CMB.xlsx',rowNames = T)
+path_data = read.xlsx('./Data/sig_res_sig_heatmap.xlsx',rowNames = T)
+cmb_tme_data = merge(cmb_data,path_data,by='row.names')
+row.names(cmb_tme_data)=cmb_tme_data$Row.names
+cmb_tme_data$Row.names=NULL
 
-# Load the data
-cmb_data = read.xlsx('./Data/TCGA.KIRC.73CMB.Manuscript.xlsx', rowNames = T)
-gene_data = read.csv('./Data/TCGA_KIRC_gene_data_primary_average.csv', row.names = 1)
-# In this case, assuming there are only TCGA and CMB columns for features
-cmb_names = colnames(cmb_data)
-cmb_gene_data = merge(cmb_data, gene_data, by="row.names")
-rownames(cmb_gene_data) = cmb_gene_data$Row.names
+cmb_names = colnames(cmb_data)[1:13]
+tme_names = colnames(path_data)
+cmbs = cmb_names
+result_root = paste(result_root,'/CMB_Path_Regression_ModelSaved_TCGABoxplots','/',sep='')
+dir.create(result_root)
 
 ###############################################################################################################
-# Settings
+# settings
 ###############################################################################################################
-features = colnames(gene_data)
-nfold = 10
 
-#features = c("MTOR")
-summary_data = matrix(NA, length(features), 2)
-rownames(summary_data) = features
-colnames(summary_data) = c("r", "p")
-summary_data = as.data.frame(summary_data)
-start_gene = "TMEM133"
-start_index = which(features == start_gene)
+features=tme_names
 
-# Loop over features starting from the "TMEM133" gene
-for (ii in c(start_index:length(features))) {
+##############################################################################################################################
+#fit lasso on continouse variables (dose, timepoint)
+##############################################################################################################################
+nfold = 5
+# write.csv(raman_data_pigment_complete,paste(result_root,'/',performer,'_phase',phase,'_',modality,'-complete','.csv',sep = ''))
+
+for(ii in c(1:length(features))){
   
-  # Define the feature name and the directory for results
   fname = features[ii]
-  print(fname)
+  result_root_sub = paste(result_root,'/',fname,'_nfold',nfold,sep = '')
+  dir.create(result_root_sub)
   
-  # Define the formula for the random forest model
-  formula_str = paste(fname, '~', paste(cmb_names, collapse = '+'), sep='')
+  ## random forest
+  formula_str = paste(fname,'~',paste(cmb_names,collapse = '+'),sep = '')
   
-  # Preprocess data: only rows where feature and CMB columns are complete
-  cmb_tme_data_complete = cmb_gene_data[complete.cases(cmb_gene_data[, c(fname, cmb_names)]), c(fname, cmb_names)]
-  if (dim(cmb_tme_data_complete)[1] < nfold) {
-    next
-  }
-  result_root_sub = paste(versioned_dir, '/', fname, '_nfold', nfold, sep='')
-  dir.create(result_root_sub, showWarnings = FALSE)
+  cmb_tme_data_complete = cmb_tme_data[complete.cases(cmb_tme_data[,c(fname,cmb_names)]), c(fname,cmb_names,'TreatmentResistancePredictionCategory')]
+  raman_data_pigment_complete_inuse = randomForest_CrossVal(cmb_tme_data_complete,as.formula(formula_str),nfold)
   
-  # Run the random forest cross-validation function
-  raman_data_pigment_complete_inuse = randomForest_CrossVal(cmb_tme_data_complete, as.formula(formula_str), nfold)
+  ## plot scatter plot
   
-  # Scatter plot between predictions and actual values
-  data_plot = data.frame(lbl_prediction = raman_data_pigment_complete_inuse$lbl_rf_prediction,
-                         lbl_groundtruth = raman_data_pigment_complete_inuse[, fname])
+  data_plot = c()
+  data_plot$lbl_prediction = raman_data_pigment_complete_inuse$lbl_rf_prediction
+  data_plot$lbl_groundtruth = raman_data_pigment_complete_inuse[,fname]
+  data_plot = as.data.frame(data_plot)
   
-  scatter_plot = ggplot(data_plot, aes(lbl_prediction, lbl_groundtruth)) +
-    geom_point() +
-    stat_smooth(method = 'lm', formula = y ~ x) +
-    ylab(fname) +
-    xlab('Random Forest Prediction') +
-    stat_cor(method = 'spearman')
-  
-  pdf(paste(result_root_sub, '/scatterplot_', fname, '_lblPrediction.pdf', sep=''))
+  scatter_plot = ggplot(data_plot,aes(lbl_prediction,lbl_groundtruth))+
+    geom_point()+
+    stat_smooth(method = 'lm',formula = y~x)+
+    ylab(fname)+
+    xlab('Randomforest_prediction')+
+    stat_cor(method='spearman')
+  pdf(paste(result_root_sub,'/scatterplot_',fname,'_lblPrediction.pdf',sep = ''))
   print(scatter_plot)
+  dev.off()
+  tiff(paste(result_root_sub,'/scatterplot_',fname,'_lblPrediction.tif',sep = ''))
+  print(scatter_plot)
+  dev.off()
+  
+  ## plot boxplot in TCGA between INR-like and ER-like groups
+  bplot = ggboxplot(raman_data_pigment_complete_inuse, x = "TreatmentResistancePredictionCategory", y = fname,
+                    outlier.colour="black",
+                    fill = "TreatmentResistancePredictionCategory")+
+    scale_color_manual(values=c("#EFC000FF", "#0073C2FF")) +
+    scale_fill_manual(values=c("#EFC000FF", "#0073C2FF")) +
+    stat_compare_means()
+  pdf(paste(result_root_sub,'/','TCGA_PRAD_',fname,'_ERvsINR.pdf',sep = ''))
+  print(bplot)
   dev.off()
 }
 
